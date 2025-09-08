@@ -5,22 +5,29 @@ import json
 import os
 
 def estimate_llm_memory(model_folder, seq_length):
-    model_path = os.path.join(model_folder, "openvino_language_model.xml")
+    model_path = os.path.join(model_folder, "openvino_language_model.bin")
     if not os.path.exists(model_path):
-        model_path = os.path.join(model_folder, "openvino_model.xml")
+        model_path = os.path.join(model_folder, "openvino_model.bin")
     core = ov.Core()
-    model = core.read_model(model_path)
+    # model = core.read_model(model_path)
     model_config_json = os.path.join(model_folder, "config.json");
 
     model_config = None
     with open(model_config_json, 'r') as f:
         model_config = json.load(f)
     
-    ops_in_topo = model.get_ordered_ops()
     const_size = 0
     attn_compenents = ['embed_tokens', 'input_layernorm', 'q_proj', 'k_proj', 'v_proj', 'rotary_emb', 'scaled_dot_product_attention', 'mlp','post_attention_layernorm']
-    # vlm model 
-    text_config = model_config['text_config'] if 'text_config' in model_config else model_config
+    # llm model
+    text_config = None
+    if "llm_config" in model_config:
+        text_config = model_config["llm_config"]
+    elif "text_config" in model_config:
+        text_config = model_config['text_config']
+    else:
+        # fallback to llm only mode
+        text_config = model_config
+
     num_attention_heads = text_config['num_attention_heads']
     num_key_value_heads = text_config['num_key_value_heads']
 
@@ -40,19 +47,18 @@ def estimate_llm_memory(model_folder, seq_length):
         # 'post_attention_layernorm': 0,
         'scaled_dot_product_attention': 0
     }
-    if 'rms_norm_eps' in model_config:
+    if 'rms_norm_eps' in text_config:
         component_size['input_layernorm'] = hidden_size
         component_size['post_attention_layernorm'] = hidden_size
 
-    if 'intermediate_size' in model_config:
-        component_size['mlp'] = model_config['intermediate_size']
-        
-    for op in ops_in_topo:
-        if op.type_info.name == 'Constant':
-            const_size = const_size + math.prod(op.get_shape()) * op.get_output_element_type(0).get_size()
+    if 'intermediate_size' in text_config:
+        component_size['mlp'] = text_config['intermediate_size']
+    const_size = 0
+    if os.path.exists(model_path):
+        const_size = os.path.getsize(model_path)
 
     temp_size = 0
-    seq_length = 3577 + 360
+    # seq_length = 3577 + 360
     element_size = 2
     print("const size ", temp_size)
     # calculate internal buffer inside hidden layer, assume that the internal memory could be shared between different layers
@@ -78,7 +84,8 @@ def estimate_llm_memory(model_folder, seq_length):
             # total_size = (3 * hidden_size + component_size[comp_name] * 2) * seq_length * element_size + total_size
         if comp_name == 'rotary_emb':
             # assume that cos/sin table rope subgraph all runs in F32
-            # matmul 
+            # matmul
+            print("Add Rotatry")
             temp_size = temp_size + seq_length * int(head_dim / 2) * 4
             # concat
             temp_size = temp_size + seq_length * head_dim * 4
@@ -92,8 +99,8 @@ def estimate_llm_memory(model_folder, seq_length):
             temp_size = temp_size + seq_length * component_size['q_proj'] * 2
 
     input_size = seq_length * 4 * 2
-    kv_cache_size = seq_length * kv_hidden_size * num_hidden_layers
-    temp_size = temp_size + model_config['vocab_size'] * 4 + input_size + kv_cache_size
+    kv_cache_size = (seq_length + 360) * kv_hidden_size * num_hidden_layers
+    temp_size = temp_size + text_config['vocab_size'] * 4 + input_size + kv_cache_size
     return const_size, temp_size
 
 if __name__ == "__main__":

@@ -5,9 +5,22 @@ import json
 import os
 
 def estimate_vit_memory(model_folder, seq_length):
-    model_path = os.path.join(model_folder, "openvino_vision_embeddings_merger_model.xml")
-    core = ov.Core()
-    model = core.read_model(model_path)
+    vision_embedding_path = os.path.join(model_folder, "openvino_vision_embeddings_model.bin")
+    vision_embedding_size = 0 
+    # check vision_embedding model
+    if os.path.exists(vision_embedding_path):
+        vision_embedding_size = os.path.getsize(vision_embedding_path)
+    merger_path = os.path.join(model_folder, "openvino_vision_embeddings_merger_model.bin")
+    # check mermger model
+    vision_merger_size = 0
+    if os.path.exists(merger_path):
+        vision_merger_size = os.path.getsize(merger_path)
+
+    # check resampler model
+    resampler_size = 0
+    resampler_path = os.path.join(model_folder, "openvino_resampler_model.bin")
+    if os.path.exists(resampler_path):
+        resampler_size = os.path.getsize(resampler_path)
     model_config_json = os.path.join(model_folder, "config.json")
 
     model_config = None
@@ -15,41 +28,55 @@ def estimate_vit_memory(model_folder, seq_length):
         model_config = json.load(f)
 
     # model.reshape({"input_ids": [-1, 1], "attention_mask": [-1, 1], "position_ids": [-1, 1], "beam_idx": [-1] })
+    const_size = vision_embedding_size + vision_merger_size + resampler_size
 
-    ops_in_topo = model.get_ordered_ops()
-    const_size = 0
-
-    attn_compenents = ['embed_tokens', 'input_layernorm', 'q_proj', 'k_proj', 'v_proj', 'rotary_emb', 'scaled_dot_product_attention', 'mlp','post_attention_layernorm', 'merger']
+    attn_compenents = ['embed_tokens', 'input_layernorm', 'q_proj', 'k_proj', 'v_proj', 'scaled_dot_product_attention', 'mlp','post_attention_layernorm''merger']
     vision_config = model_config['vision_config']
-    num_attention_heads = vision_config['num_heads']
+    num_attention_heads = vision_config['num_heads'] if "num_heads" in vision_config else vision_config['num_attention_heads']
     out_hidden_size= vision_config['out_hidden_size'] if "out_hidden_size" in vision_config else vision_config["hidden_size"]
 
     hidden_size = vision_config['hidden_size']
     # vit doesn't have multi-query
     kv_hidden_size = hidden_size
-    depth = vision_config['depth']
     head_dim = vision_config['head_dim'] if 'head_dim' in vision_config else hidden_size // num_attention_heads
-    window_size =  vision_config['window_size']
+    model_type = None
+    has_rope = False
+    if 'model_type' in vision_config and vision_config['model_type'] == "qwen2_5_vl":
+        has_rope = True
+        attn_compenents.append('merger')
+    if 'architectures' in vision_config:
+        model_type = "InternVisionModel"
+    if model_type == "InternVisionModel":
+        has_rope = False
     component_size = {
         'q_proj': hidden_size,
         'k_proj': kv_hidden_size,
         'v_proj': kv_hidden_size,
         'hidden_states_input': hidden_size,
-        'rotary_emb': 0,
         'input_layernorm': 0,
         'post_attention_layernorm': 0,
         'scaled_dot_product_attention': 0
     }
+    
+    if has_rope:
+        component_size['rotary_emb'] = True
 
     if 'intermediate_size' in vision_config:
-        component_size['mlp'] = model_config['intermediate_size']
+        component_size['mlp'] = vision_config['intermediate_size']
 
     if 'spatial_merge_size' in vision_config:
         component_size['merger'] = seq_length // (vision_config['spatial_merge_size'] ** 2)
+
+    if resampler_size:
+        attn_compenents.append("resampler")
         
-    for op in ops_in_topo:
-        if op.type_info.name == 'Constant':
-            const_size = const_size + math.prod(op.get_shape()) * op.get_output_element_type(0).get_size()
+        resampler_k_proj = model_config["hidden_size"]
+        # for query of resampler in minicpm, the lenght is fixed as batch * model_config["query_num"] * model_config["hidden_size"]
+        resampler_q_proj = 10 * model_config["query_num"] * model_config["hidden_size"]
+        resampler_v_proj = model_config["hidden_size"]
+        component_size['resampler'] = resampler_q_proj * 2 + resampler_k_proj + resampler_v_proj
+
+    print(component_size)
     temp_size = 0   
     element_size = 2
     # calculate internal buffer inside hidden layer, assume that the internal memory could be shared between different layers
@@ -76,7 +103,8 @@ def estimate_vit_memory(model_folder, seq_length):
             # temp_size = (3 * hidden_size + component_size[comp_name] * 2) * seq_length * element_size + temp_size
         if comp_name == 'rotary_emb':
             # assume that cos/sin table rope subgraph all runs in F32
-            # rotary_pos_emb 
+            # rotary_pos_emb
+            print("Add rotary_emb")
             temp_size = temp_size + seq_length * head_dim // 2 * 4
             # concat
             temp_size = temp_size + seq_length * head_dim * 4
@@ -91,17 +119,21 @@ def estimate_vit_memory(model_folder, seq_length):
             # rope q
             temp_size = temp_size + seq_length * component_size['q_proj'] * 2
         if comp_name == 'merger':
+            print("Add merger")
             mlp2 =  component_size['merger'] * out_hidden_size
             # first FC could resuse RMS input
-            print("Add mlp2 ", mlp2)
             # allocate output for 2nd FC
             temp_size = temp_size + mlp2
+        if comp_name == 'resampler':
+            print("Add resampler")
+            temp_size = temp_size + component_size['resampler']
             
     # print(temp_size)
     # input_ids
     # position_ids
     input_size = seq_length * 4 * hidden_size
-    window_attention_mask_size = seq_length * seq_length
+    # window attention_mask is a special input of qwen2_5
+    window_attention_mask_size = seq_length * seq_length if vision_config['model_type'] == "qwen2_5_vl" else 0
     temp_size = temp_size + window_attention_mask_size + input_size
     return const_size, temp_size
 
