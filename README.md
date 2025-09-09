@@ -12,8 +12,9 @@ python3 estimate_vit.py <ov model folder> <seq_length>
 Total VIT Runtime Memory 1.72 GB weight 1.24 GB temp 0.48 GB
 ```
 ## 3. Estimate VLM pipline
-### 3.0 Input Image
-W x H 1024 * 682
+### 3.0 Input Data
+- W x H: `1024 * 682`
+- Prompt: `Please Describe this picture`
 ### 3.1 Estimate qwen2_5-3b-vl
 ```bash
 python3 estimate_vlm.py <ov model folder> <seq_length>
@@ -23,17 +24,17 @@ Total VIT Runtime Memory 1.72 GB weight 1.24 GB temp 0.48 GB
 Total LLM Runtime Memory 6.02 GB weight 5.75 GB temp 0.27 GB
 Total VIT + LLM + Embeddings Runtime Memory 8.32 GB
 # OV 13GB
-# Llama.cpp 9340 MB
+# Llama.cpp 9234 MB
 ```
 ### 3.2 Estimate internvl2_5-4b
 ```bash
-# batch 7 * 1025
+# slices 7  output_channel 1024 class_channel 1 7175 = 7 * 1025
 python3 ./estimate_vlm.py /mnt/llm_irs/zhangyi7/ov-internvl2_5-4b/ 7175
 Total VIT Runtime Memory 1.48 GB weight 1.25 GB temp 0.23 GB
 Total LLM Runtime Memory 5.87 GB weight 5.75 GB temp 0.13 GB
 Total VIT + LLM + Embeddings Runtime Memory 7.22 GB
 # OV 7500 MB
-# Llama.cpp 7778 MB
+# Llama.cpp 7672 MB
 ```
 ### 3.3 Estimate minicpm-v-2-5-4bit
 ```bash
@@ -43,7 +44,7 @@ Total VIT Runtime Memory 0.59 GB weight 0.45 GB temp 0.14 GB
 Total LLM Runtime Memory 3.71 GB weight 3.66 GB temp 0.05 GB
 Total VIT + LLM + Embeddings Runtime Memory 4.81 GB
 # OV 5400 MB
-# Llama.cpp 6636 MB
+# Llama.cpp 6530 MB
 ```
 ## 3. Estimation Assumption
 * Runtime buffers are resued among different atttention blocks
