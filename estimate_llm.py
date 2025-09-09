@@ -98,7 +98,7 @@ def estimate_llm_memory(model_folder, seq_length):
             # rope q
             temp_size = temp_size + seq_length * component_size['q_proj'] * 2
 
-    input_size = seq_length * 4 * 2
+    input_size = seq_length * 4 * hidden_size
     kv_cache_size = (seq_length + 360) * kv_hidden_size * num_hidden_layers
     temp_size = temp_size + text_config['vocab_size'] * 4 + input_size + kv_cache_size
     return const_size, temp_size

@@ -26,6 +26,10 @@ def estimate_vlm_memory(model_folder, seq_length):
     if model_arch == "MiniCPMV":
         # input_ids for llm
         output_seq_length = 359
+    if model_arch == "Gemma3ForConditionalGeneration":
+        output_seq_length = 272
+    if model_arch == "LlavaForConditionalGeneration":
+        output_seq_length = 592
 
     llm_const_size, llm_temp_size = estimate_llm_memory(model_folder, output_seq_length)
     llm_total_size = llm_const_size + llm_temp_size
