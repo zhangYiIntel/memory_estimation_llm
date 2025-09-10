@@ -21,6 +21,11 @@ def estimate_vit_memory(model_folder, seq_length):
     resampler_path = os.path.join(model_folder, "openvino_resampler_model.bin")
     if os.path.exists(resampler_path):
         resampler_size = os.path.getsize(resampler_path)
+    
+    projection_size = 0
+    vision_proj_path = os.path.join(model_folder, "openvino_vision_projection_model.bin")
+    if os.path.exists(vision_proj_path):
+        projection_size = os.path.getsize(vision_proj_path)
     model_config_json = os.path.join(model_folder, "config.json")
 
     model_config = None
@@ -28,17 +33,25 @@ def estimate_vit_memory(model_folder, seq_length):
         model_config = json.load(f)
 
     # model.reshape({"input_ids": [-1, 1], "attention_mask": [-1, 1], "position_ids": [-1, 1], "beam_idx": [-1] })
-    const_size = vision_embedding_size + vision_merger_size + resampler_size
+    const_size = vision_embedding_size + vision_merger_size + resampler_size + projection_size
 
     attn_compenents = ['embed_tokens', 'input_layernorm', 'q_proj', 'k_proj', 'v_proj', 'scaled_dot_product_attention', 'mlp','post_attention_layernorm''merger']
-    vision_config = model_config['vision_config']
-    num_attention_heads = vision_config['num_heads'] if "num_heads" in vision_config else vision_config['num_attention_heads']
-    out_hidden_size= vision_config['out_hidden_size'] if "out_hidden_size" in vision_config else vision_config["hidden_size"]
-
-    hidden_size = vision_config['hidden_size']
-    # vit doesn't have multi-query
-    kv_hidden_size = hidden_size
-    head_dim = vision_config['head_dim'] if 'head_dim' in vision_config else hidden_size // num_attention_heads
+    vision_config = model_config['vision_config'] if "vision_config" in model_config else model_config
+    if model_config['model_type'] == "phi3_v":
+        # Phi-3 uses hardcoded CLIP VIT
+        num_attention_heads = 16
+        hidden_size = 1024
+        intermediate_size = 4096
+        kv_hidden_size = hidden_size
+        head_dim = hidden_size // num_attention_heads
+    else:   
+        num_attention_heads = vision_config['num_heads'] if "num_heads" in vision_config else vision_config['num_attention_heads']
+        out_hidden_size= vision_config['out_hidden_size'] if "out_hidden_size" in vision_config else vision_config["hidden_size"]
+        hidden_size = vision_config['hidden_size']
+        # vit doesn't have multi-query
+        kv_hidden_size = hidden_size
+        head_dim = vision_config['head_dim'] if 'head_dim' in vision_config else hidden_size // num_attention_heads
+        intermediate_size = vision_config['intermediate_size']
     model_type = None
     has_rope = False
     if 'model_type' in vision_config and vision_config['model_type'] == "qwen2_5_vl":
@@ -62,7 +75,7 @@ def estimate_vit_memory(model_folder, seq_length):
         component_size['rotary_emb'] = True
 
     if 'intermediate_size' in vision_config:
-        component_size['mlp'] = vision_config['intermediate_size']
+        component_size['mlp'] = intermediate_size
 
     if 'spatial_merge_size' in vision_config:
         component_size['merger'] = seq_length // (vision_config['spatial_merge_size'] ** 2)
@@ -71,10 +84,17 @@ def estimate_vit_memory(model_folder, seq_length):
         attn_compenents.append("resampler")
         
         resampler_k_proj = model_config["hidden_size"]
-        # for query of resampler in minicpm, the lenght is fixed as batch * model_config["query_num"] * model_config["hidden_size"]
+        # for query of resampler in minicpm, the length is fixed as batch * model_config["query_num"] * model_config["hidden_size"]
         resampler_q_proj = 10 * model_config["query_num"] * model_config["hidden_size"]
         resampler_v_proj = model_config["hidden_size"]
-        component_size['resampler'] = resampler_q_proj * 2 + resampler_k_proj + resampler_v_proj
+        component_size['resampler'] = (resampler_q_proj + resampler_k_proj + resampler_v_proj) * 2
+    
+    if projection_size:
+        attn_compenents.append("projection")
+        mlp1 = model_config["hidden_size"]
+        mlp2 = model_config["hidden_size"]
+        # hardcode the image length to 757 here
+        component_size['projection'] = (mlp1 + mlp2) * 2 * 757
 
     print(component_size)
     temp_size = 0   
@@ -127,6 +147,9 @@ def estimate_vit_memory(model_folder, seq_length):
         if comp_name == 'resampler':
             print("Add resampler")
             temp_size = temp_size + component_size['resampler']
+        if comp_name == 'projection':
+            print("Add projection")
+            temp_size = temp_size + component_size['projection']
             
     # print(temp_size)
     # input_ids
